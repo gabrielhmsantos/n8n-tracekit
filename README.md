@@ -71,3 +71,11 @@ Tracing level:
 ```bash
 TRACING_LOG_LEVEL=info
 ```
+
+**Contributing**
+We welcome contributions that improve the OpenTelemetry experience in n8n. Here are some high‑impact areas:
+- Enhancements to tracing instrumentation.
+- Better span naming and richer span attributes.
+- Correlation between traces, metrics, and logs.
+- Suggestions for collector integrations and pipelines.
+- Performance optimizations (startup time, memory, CPU, and tracing overhead).
