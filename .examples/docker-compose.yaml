@@ -1,0 +1,182 @@
+version: "3.7"
+
+services:
+  main:
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      # Database (external)
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${POSTGRES_HOST:-postgres.example.com}
+      - DB_POSTGRESDB_PORT=${POSTGRES_PORT:-5432}
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-change_me}
+
+      # Encryption
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change_me}
+
+      # URLs
+      - N8N_HOST=${N8N_HOST:-n8n.example.com}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-https://n8n.example.com/}
+      - WEBHOOK_URL=${WEBHOOK_URL:-https://webhook.example.com/}
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-https}
+
+      # Runtime
+      - NODE_ENV=${NODE_ENV:-production}
+      - EXECUTIONS_MODE=queue
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+
+      # Redis (external)
+      - QUEUE_BULL_REDIS_HOST=${REDIS_HOST:-redis.example.com}
+      - QUEUE_BULL_REDIS_PORT=${REDIS_PORT:-6379}
+      - QUEUE_BULL_REDIS_DB=${REDIS_DB:-0}
+
+      # External runners
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN:-change_me}
+
+      # OpenTelemetry - Full pipeline (traces + logs + metrics)
+      # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
+      # - OTEL_LOG_LEVEL=${OTEL_LOG_LEVEL:-INFO}
+
+      # OpenTelemetry - Traces only
+      # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
+      # - OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER:-none}
+      # - OTEL_METRICS_EXPORTER=${OTEL_METRICS_EXPORTER:-none}
+
+      # OpenTelemetry - Authentication (if required)
+      # - OTEL_EXPORTER_OTLP_HEADERS=authorization=change_me
+
+      # OpenTelemetry - Tracing Level
+      - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+
+      # Timezone
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+      - TZ=${TZ:-UTC}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  webhook:
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    command: webhook
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${POSTGRES_HOST:-postgres.example.com}
+      - DB_POSTGRESDB_PORT=${POSTGRES_PORT:-5432}
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-change_me}
+
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change_me}
+
+      - N8N_HOST=${N8N_HOST:-n8n.example.com}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-https://n8n.example.com/}
+      - WEBHOOK_URL=${WEBHOOK_URL:-https://webhook.example.com/}
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-https}
+
+      - NODE_ENV=${NODE_ENV:-production}
+      - EXECUTIONS_MODE=queue
+
+      - QUEUE_BULL_REDIS_HOST=${REDIS_HOST:-redis.example.com}
+      - QUEUE_BULL_REDIS_PORT=${REDIS_PORT:-6379}
+      - QUEUE_BULL_REDIS_DB=${REDIS_DB:-0}
+
+      # OpenTelemetry - Full pipeline (traces + logs + metrics)
+      # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
+      # - OTEL_LOG_LEVEL=${OTEL_LOG_LEVEL:-INFO}
+
+      # OpenTelemetry - Traces only
+      # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
+      # - OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER:-none}
+      # - OTEL_METRICS_EXPORTER=${OTEL_METRICS_EXPORTER:-none}
+
+      # OpenTelemetry - Authentication (if required)
+      # - OTEL_EXPORTER_OTLP_HEADERS=authorization=change_me
+
+      # OpenTelemetry - Tracing Level
+      - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+      - TZ=${TZ:-UTC}
+
+  worker:
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-10}
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${POSTGRES_HOST:-postgres.example.com}
+      - DB_POSTGRESDB_PORT=${POSTGRES_PORT:-5432}
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-change_me}
+
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change_me}
+      - EXECUTIONS_MODE=queue
+
+      - QUEUE_BULL_REDIS_HOST=${REDIS_HOST:-redis.example.com}
+      - QUEUE_BULL_REDIS_PORT=${REDIS_PORT:-6379}
+      - QUEUE_BULL_REDIS_DB=${REDIS_DB:-0}
+
+      # External runners
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN:-change_me}
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+
+      # OpenTelemetry - Full pipeline (traces + logs + metrics)
+      # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
+      # - OTEL_LOG_LEVEL=${OTEL_LOG_LEVEL:-INFO}
+
+      # OpenTelemetry - Traces only
+      # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
+      # - OTEL_SDK_DISABLED=false
+      # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
+      # - OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER:-none}
+      # - OTEL_METRICS_EXPORTER=${OTEL_METRICS_EXPORTER:-none}
+
+      # OpenTelemetry - Authentication (if required)
+      # - OTEL_EXPORTER_OTLP_HEADERS=authorization=change_me
+
+      # OpenTelemetry - Tracing Level
+      - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+      - TZ=${TZ:-UTC}
+
+  runners:
+    image: n8nio/runners:${N8N_RUNNERS_TAG:-2.6.4}
+    environment:
+      - N8N_RUNNERS_TASK_BROKER_URI=http://worker:5679
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN:-change_me}
+      - N8N_RUNNERS_MAX_CONCURRENCY=${N8N_RUNNERS_MAX_CONCURRENCY:-20}
+      - NODE_OPTIONS=--max-old-space-size=512
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+
+volumes:
+  n8n_data:

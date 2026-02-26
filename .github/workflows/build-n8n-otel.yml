@@ -1,0 +1,105 @@
+name: Build n8n OTel image
+
+on:
+  schedule:
+    - cron: "0 0,12 * * *"
+  workflow_dispatch:
+    inputs:
+      n8n_version:
+        description: "n8n version (ex: 2.6.4). Leave empty or use 'latest' to resolve from releases."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: gabrielhmsantos/n8n-otel
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve n8n version
+        id: version
+        run: |
+          set -euo pipefail
+          INPUT_VERSION="${{ github.event.inputs.n8n_version || '' }}"
+          TAG_LATEST="false"
+          if [ -z "$INPUT_VERSION" ] || [ "$INPUT_VERSION" = "latest" ]; then
+            TAG="$(curl -s https://api.github.com/repos/n8n-io/n8n/releases/latest | jq -r '.tag_name')"
+            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+              echo "Failed to resolve latest release tag" >&2
+              exit 1
+            fi
+            VERSION="$TAG"
+            VERSION="${VERSION#n8n@}"
+            VERSION="${VERSION#v}"
+            TAG_LATEST="true"
+          else
+            VERSION="$INPUT_VERSION"
+            VERSION="${VERSION#n8n@}"
+            VERSION="${VERSION#v}"
+          fi
+          TAGS="${IMAGE_NAME}:${VERSION}"
+          if [ "$TAG_LATEST" = "true" ]; then
+            TAGS="${TAGS}\n${IMAGE_NAME}:latest"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag_latest=$TAG_LATEST"
+            echo "tags<<EOF"
+            printf "%b\n" "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check if image already exists
+        id: exists
+        run: |
+          set -euo pipefail
+          IMAGE_VERSION="${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+          if docker manifest inspect "$IMAGE_VERSION" >/dev/null 2>&1; then
+            echo "exists_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists_version=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ steps.version.outputs.tag_latest }}" = "true" ]; then
+            IMAGE_LATEST="${{ env.IMAGE_NAME }}:latest"
+            if docker manifest inspect "$IMAGE_LATEST" >/dev/null 2>&1; then
+              echo "exists_latest=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "exists_latest=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "exists_latest=not_applicable" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.exists.outputs.exists_version != 'true' || (steps.version.outputs.tag_latest == 'true' && steps.exists.outputs.exists_latest != 'true')
+        uses: docker/build-push-action@v6
+        with:
+          context: ./build
+          file: ./build/Dockerfile
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          build-args: |
+            N8N_VERSION=${{ steps.version.outputs.version }}
+
+      - name: Skip build (image already exists)
+        if: steps.exists.outputs.exists_version == 'true' && (steps.version.outputs.tag_latest != 'true' || steps.exists.outputs.exists_latest == 'true')
+        run: |
+          echo "Image already exists for version ${{ steps.version.outputs.version }}. Skipping build."
