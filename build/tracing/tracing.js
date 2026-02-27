@@ -51,12 +51,12 @@ registerInstrumentations({
   instrumentations: [autoInstrumentations],
 })
 
-const langfuseEnabled = hasEnv('LANGFUSE_PUBLIC_KEY') && hasEnv('LANGFUSE_SECRET_KEY')
 const workflowTracingEnabled = readBool(process.env.TRACING_WORKFLOW_ENABLED, true)
-const llmTracingEnabled =
-  process.env.TRACING_LLM_ENABLED !== undefined
-    ? readBool(process.env.TRACING_LLM_ENABLED, false)
-    : langfuseEnabled
+const llmTracingEnabled = readBool(process.env.TRACING_LLM_ENABLED, false)
+const langfuseEnabled =
+  llmTracingEnabled &&
+  hasEnv('LANGFUSE_PUBLIC_KEY') &&
+  hasEnv('LANGFUSE_SECRET_KEY')
 
 if (workflowTracingEnabled) {
   console.log(`${LOGPREFIX}: Setting up workflow tracing...`)
@@ -66,12 +66,13 @@ if (workflowTracingEnabled) {
 }
 
 if (llmTracingEnabled) {
-  const payloadMode = (process.env.TRACING_LLM_PAYLOAD || 'metadata').toLowerCase()
-  console.log(`${LOGPREFIX}: Setting up LLM tracing (payload=${payloadMode})...`)
+  const debugEvents = readBool(process.env.TRACING_LLM_DEBUG_EVENTS, false)
+  const debugExport = readBool(process.env.TRACING_LLM_DEBUG_EXPORT, false)
+  console.log(`${LOGPREFIX}: Setting up LLM tracing (payload=full)...`)
   setupLlmTracing({
     logPrefix: LOGPREFIX,
     debug: DEBUG,
-    payloadMode,
+    debugEvents,
     langfuseEnabled,
   })
 } else {
@@ -157,7 +158,52 @@ function setupOpenTelemetryNodeSDK({ langfuseEnabled }) {
   if (langfuseEnabled) {
     try {
       const { LangfuseSpanProcessor } = require('@langfuse/otel')
-      spanProcessors.push(new LangfuseSpanProcessor())
+      const debugExport = readBool(process.env.TRACING_LLM_DEBUG_EXPORT, false)
+      const resolveOtelSpan = (span) => {
+        if (!span) return span
+        if (typeof span === 'object' && span.otelSpan) return span.otelSpan
+        return span
+      }
+      const shouldExportSpan = (span) => {
+        const otelSpan = resolveOtelSpan(span)
+        const name = typeof otelSpan === 'string' ? otelSpan : otelSpan?.name
+        if (typeof name === 'string' && name.startsWith('n8n.ai.')) return true
+
+        const scopeName =
+          typeof otelSpan === 'object'
+            ? otelSpan?.instrumentationScope?.name || otelSpan?.instrumentationLibrary?.name
+            : undefined
+        if (scopeName && ['langfuse-sdk', 'ai'].includes(String(scopeName))) return true
+        if (scopeName && String(scopeName).toLowerCase().includes('langfuse')) return true
+
+        const attrs = typeof otelSpan === 'object' ? otelSpan?.attributes || {} : {}
+        return Object.keys(attrs).some((key) => key.startsWith('langfuse.'))
+      }
+      const shouldExportSpanWithDebug = (span) => {
+        const decision = shouldExportSpan(span)
+        if (debugExport) {
+          const otelSpan = resolveOtelSpan(span)
+          const name = typeof otelSpan === 'string' ? otelSpan : otelSpan?.name || 'unknown'
+          const scopeName =
+            typeof otelSpan === 'object'
+              ? otelSpan?.instrumentationScope?.name ||
+                otelSpan?.instrumentationLibrary?.name ||
+                ''
+              : ''
+          const spanType = typeof span
+          const wrapperKeys =
+            typeof span === 'object' && span ? Object.keys(span).slice(0, 6).join(',') : ''
+          const otelKeys =
+            typeof otelSpan === 'object' && otelSpan
+              ? Object.keys(otelSpan).slice(0, 6).join(',')
+              : ''
+          console.log(
+            `${LOGPREFIX}: [Langfuse] export=${decision} name=${name} scope=${scopeName} type=${spanType} wrapperKeys=${wrapperKeys} otelKeys=${otelKeys}`,
+          )
+        }
+        return decision
+      }
+      spanProcessors.push(new LangfuseSpanProcessor({ shouldExportSpan: shouldExportSpanWithDebug }))
       console.log(`${LOGPREFIX}: LangfuseSpanProcessor enabled`)
     } catch (error) {
       console.warn(`${LOGPREFIX}: Failed to load LangfuseSpanProcessor: ${error.message}`)
