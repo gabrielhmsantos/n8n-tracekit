@@ -10,6 +10,7 @@ const { flatten } = require('flat')
 
 function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
   const tracer = trace.getTracer('n8n-instrumentation', '1.0.0')
+  const BaseExecuteContext = resolveBaseExecuteContext()
 
   try {
     // Import n8n core modules
@@ -37,6 +38,11 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
         }
         if (hooks) {
           this.__n8nOtelHooks = hooks
+          if (BaseExecuteContext?.prototype?.logAiEvent) {
+            hooks.__n8nOtelLogAiEvent = BaseExecuteContext.prototype.logAiEvent
+          }
+          hooks.__n8nOtelAdditionalData = this?.additionalData
+          hooks.__n8nOtelWorkflow = this?.workflow
         }
       } catch (error) {
         console.warn(`${logPrefix}: Failed to attach lifecycle hooks: ${error.message}`)
@@ -55,13 +61,20 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
           }
 
           const executionIndex = (this?.additionalData?.currentNodeExecutionIndex ?? 0) - 1
+          const executionData = arguments?.[1]
+          const nodeType = executionData?.node?.type ?? ''
+          const toolInputStore = hooks?.__n8nOtelToolInputStore
+          if (toolInputStore && isToolNodeType(nodeType)) {
+            const toolInput = extractInputJson(executionData?.data)
+            if (toolInput !== undefined) {
+              toolInputStore.set(executionIndex, toolInput)
+            }
+          }
+
           const nodeSpan = nodeSpanStore.get(executionIndex)
           if (!nodeSpan) {
             return originalRunNode.apply(this, arguments)
           }
-
-          const executionData = arguments?.[1]
-          const nodeType = executionData?.node?.type ?? ''
           if (isAgentOrToolNode(nodeType)) {
             return originalRunNode.apply(this, arguments)
           }
@@ -124,10 +137,12 @@ function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
   const nodeSpanStore = new Map()
   const nodeSpanByName = new Map()
   const syntheticAgentSpans = new Set()
+  const toolInputStore = new Map()
   let workflowSpan = null
   hooks.__n8nOtelNodeSpanStore = nodeSpanStore
   hooks.__n8nOtelNodeSpanByName = nodeSpanByName
   hooks.__n8nOtelSyntheticAgentSpans = syntheticAgentSpans
+  hooks.__n8nOtelToolInputStore = toolInputStore
 
   const startWorkflowSpan = (workflow) => {
     if (workflowSpan) return
@@ -189,6 +204,7 @@ function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
       syntheticAgentSpans.clear()
       nodeSpanByName.clear()
       nodeSpanStore.clear()
+      toolInputStore.clear()
     }
   })
 
@@ -218,7 +234,7 @@ function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
     let parentSpan = workflowSpan
 
     if (agentParentName) {
-    const agentSpan =
+      const agentSpan =
         nodeSpanByName.get(agentParentName) ||
         createSyntheticAgentSpan({
           executionContext: this,
@@ -257,6 +273,8 @@ function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
     const spanKey = taskData?.executionIndex
     const existingSpan = nodeSpanStore.get(spanKey)
     const fallbackSpan = nodeSpanByName.get(nodeName)
+    const node = this?.workflowData?.nodes?.find((item) => item.name === nodeName)
+    const nodeType = node?.type ?? ''
     const nodeSpan =
       existingSpan ||
       fallbackSpan ||
@@ -282,6 +300,38 @@ function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
           code: SpanStatusCode.ERROR,
           message: String(taskData.error.message || taskData.error),
         })
+      }
+
+      if (isToolNodeName(this?.workflowData, nodeName) || isToolNodeType(nodeType)) {
+        const toolInput = toolInputStore.get(spanKey)
+        const toolOutput = extractOutputJson(taskData?.data)
+        const logAiEvent = hooks.__n8nOtelLogAiEvent
+        if (typeof logAiEvent === 'function') {
+          const agentParentName = resolveAgentParentName(this, nodeName, taskData)
+          const agentNode =
+            agentParentName &&
+            this?.workflowData?.nodes?.find((item) => item.name === agentParentName)
+          const fakeContext = {
+            additionalData: hooks.__n8nOtelAdditionalData,
+            node: node || { name: nodeName, type: nodeType },
+            workflow: hooks.__n8nOtelWorkflow || this?.workflowData,
+            parentNode: agentNode,
+          }
+          const payload = {
+            input: toolInput,
+            response: toolOutput,
+            tool: { name: nodeName },
+            _source: 'workflow-tool',
+            _executionIndex: spanKey,
+          }
+          try {
+            logAiEvent.call(fakeContext, 'ai-tool-called', safeStringify(payload))
+          } catch (error) {
+            if (debug) {
+              console.warn(`${logPrefix}: Failed to emit tool event: ${error.message}`)
+            }
+          }
+        }
       }
 
       const outputJson = extractOutputJson(taskData?.data)
@@ -310,6 +360,19 @@ function extractOutputJson(taskDataConnections) {
     return main[0].map((item) => item?.json)
   }
   return taskDataConnections
+}
+
+function extractInputJson(taskDataConnections) {
+  if (!taskDataConnections || typeof taskDataConnections !== 'object') return undefined
+  const collected = {}
+  for (const [key, value] of Object.entries(taskDataConnections)) {
+    if (!Array.isArray(value) || !Array.isArray(value[0])) continue
+    collected[key] = value[0].map((item) => item?.json ?? item)
+  }
+  const keys = Object.keys(collected)
+  if (!keys.length) return taskDataConnections
+  if (keys.length === 1) return collected[keys[0]]
+  return collected
 }
 
 function resolveAgentParentName(context, nodeName, taskStartedData) {
@@ -402,6 +465,14 @@ function isAgentOrToolNode(nodeType) {
   return normalized.includes('.agent') || normalized.includes('.tool')
 }
 
+function isToolNodeName(workflowData, nodeName) {
+  if (!workflowData || !nodeName) return false
+  const node = workflowData?.nodes?.find((item) => item.name === nodeName)
+  if (isToolNodeType(node?.type)) return true
+  const connections = workflowData?.connections?.[nodeName]
+  return Array.isArray(connections?.ai_tool)
+}
+
 function isAgentNodeName(workflowData, nodeName) {
   if (!workflowData || !nodeName) return false
   const node = workflowData?.nodes?.find((item) => item.name === nodeName)
@@ -411,6 +482,34 @@ function isAgentNodeName(workflowData, nodeName) {
 function isAgentNodeType(nodeType) {
   if (typeof nodeType !== 'string') return false
   return nodeType.toLowerCase().includes('.agent')
+}
+
+function isToolNodeType(nodeType) {
+  if (typeof nodeType !== 'string') return false
+  return nodeType.toLowerCase().includes('.tool')
+}
+
+function resolveBaseExecuteContext() {
+  const candidates = [
+    'n8n-core/dist/execution-engine/node-execution-context/base-execute-context',
+    'n8n-core/dist/execution-engine/node-execution-context/base-execute-context.js',
+    'n8n-core/src/execution-engine/node-execution-context/base-execute-context',
+    'n8n-core/src/execution-engine/node-execution-context/base-execute-context.js',
+  ]
+
+  for (const candidate of candidates) {
+    try {
+      const mod = require(candidate)
+      const BaseExecuteContext = mod?.BaseExecuteContext || mod?.default || mod
+      if (BaseExecuteContext?.prototype?.logAiEvent) {
+        return BaseExecuteContext
+      }
+    } catch (error) {
+      continue
+    }
+  }
+
+  return null
 }
 
 module.exports = { setupWorkflowTracing }

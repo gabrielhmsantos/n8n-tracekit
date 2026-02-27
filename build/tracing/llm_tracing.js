@@ -410,6 +410,8 @@ function getOrCreateAgentTrace(store, agentContext, normalized, baseMetadata) {
     timer: null,
     generationCount: 0,
     toolCount: 0,
+    toolEventsSeen: new Set(),
+    toolNativeSeen: new Set(),
     traceInputSet: !!rootInput,
   }
 
@@ -462,6 +464,9 @@ function normalizeEventPayload({ eventName, payload, context, agentContext }) {
   const toolName = resolveToolName(payload, context)
   const toolInput = resolveToolInput(payload)
   const toolOutput = resolveToolOutput(payload)
+  const toolSource = payload?._source
+  const toolExecutionIndex = payload?._executionIndex
+  const toolCallId = payload?.toolCallId || payload?.tool_call_id || payload?.id
 
   return {
     eventName,
@@ -474,6 +479,9 @@ function normalizeEventPayload({ eventName, payload, context, agentContext }) {
     toolName,
     toolInput,
     toolOutput,
+    toolSource,
+    toolExecutionIndex,
+    toolCallId,
   }
 }
 
@@ -493,8 +501,20 @@ function buildLangfuseObservation({
   })
 
   if (eventName === 'ai-tool-called') {
-    agentTrace.toolCount += 1
     const toolLabel = normalizeName(normalized.toolName || 'tool')
+    const toolKeyBase = `${agentContext.executionId}:${toolLabel}`
+    const isWorkflowSource = normalized.toolSource === 'workflow-tool'
+    if (!isWorkflowSource) {
+      agentTrace.toolNativeSeen.add(toolKeyBase)
+    } else if (agentTrace.toolNativeSeen.has(toolKeyBase)) {
+      return null
+    }
+    const dedupeKey = `${toolKeyBase}:${normalized.toolExecutionIndex ?? normalized.toolCallId ?? 'na'}:${isWorkflowSource ? 'w' : 'n'}`
+    if (agentTrace.toolEventsSeen.has(dedupeKey)) {
+      return null
+    }
+    agentTrace.toolEventsSeen.add(dedupeKey)
+    agentTrace.toolCount += 1
     return {
       asType: 'tool',
       name: `tool:${toolLabel}`,
@@ -632,7 +652,7 @@ function mapUsage(usage) {
 }
 
 function resolveToolName(payload, context) {
-  return payload?.tool?.name || context?.node?.name || payload?.toolName || 'tool'
+  return payload?.tool?.name || context?.node?.name || 'tool'
 }
 
 function resolveToolInput(payload) {
