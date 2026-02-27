@@ -16,8 +16,10 @@ WORKDIR /opt/opentelemetry
 COPY ./tracing/package.json package.json
 COPY ./tracing/package-lock.json package-lock.json
 COPY ./tracing/tracing.js tracing.js
+COPY ./tracing/workflow_tracing.js workflow_tracing.js
+COPY ./tracing/llm_tracing.js llm_tracing.js
 RUN chown node:node ./*.js
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 # Create a symlink to n8n-core in the OpenTelemetry node_modules directory
 # tracing.js patches n8n-core to trace workflow executions

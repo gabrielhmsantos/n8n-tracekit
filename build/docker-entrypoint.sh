@@ -11,17 +11,26 @@ if [ -d /opt/custom-certificates ]; then
   c_rehash /opt/custom-certificates
 fi
 
-if [ "${OTEL_SDK_DISABLED}" = "false" ]; then
+is_true() {
+  value=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+workflow_enabled="${TRACING_WORKFLOW_ENABLED:-false}"
+llm_enabled="${TRACING_LLM_ENABLED:-false}"
+
+if is_true "$workflow_enabled" || is_true "$llm_enabled"; then
   echo "Starting n8n with OpenTelemetry instrumentation..."
   export NODE_PATH="/opt/opentelemetry/node_modules:/usr/local/lib/node_modules:${NODE_PATH}"
   exec node --require /opt/opentelemetry/tracing.js /usr/local/bin/n8n "$@"
 else
-  echo "OpenTelemetry disabled, starting n8n normally..."
+  echo "Tracing disabled (TRACING_WORKFLOW_ENABLED=false and TRACING_LLM_ENABLED=false), starting n8n normally..."
   if [ "$#" -gt 0 ]; then
-    # Got started with arguments
     exec n8n "$@"
   else
-    # Got started without arguments
     exec n8n
   fi
 fi

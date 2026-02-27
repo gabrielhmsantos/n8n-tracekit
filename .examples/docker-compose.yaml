@@ -40,7 +40,6 @@ services:
 
       # OpenTelemetry - Full pipeline (traces + logs + metrics)
       # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
@@ -48,7 +47,6 @@ services:
 
       # OpenTelemetry - Traces only
       # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
@@ -60,6 +58,15 @@ services:
 
       # OpenTelemetry - Tracing Level
       - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+      - TRACING_WORKFLOW_ENABLED=${TRACING_WORKFLOW_ENABLED:-false}
+      - TRACING_LLM_ENABLED=${TRACING_LLM_ENABLED:-false}
+      - TRACING_LLM_DEBUG_EVENTS=${TRACING_LLM_DEBUG_EVENTS:-false}
+      - TRACING_LLM_DEBUG_EXPORT=${TRACING_LLM_DEBUG_EXPORT:-false}
+
+      # Langfuse (LLM tracing)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
 
       # Timezone
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
@@ -95,7 +102,6 @@ services:
 
       # OpenTelemetry - Full pipeline (traces + logs + metrics)
       # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
@@ -103,7 +109,6 @@ services:
 
       # OpenTelemetry - Traces only
       # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
@@ -115,6 +120,15 @@ services:
 
       # OpenTelemetry - Tracing Level
       - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+      - TRACING_WORKFLOW_ENABLED=${TRACING_WORKFLOW_ENABLED:-false}
+      - TRACING_LLM_ENABLED=${TRACING_LLM_ENABLED:-false}
+      - TRACING_LLM_DEBUG_EVENTS=${TRACING_LLM_DEBUG_EVENTS:-false}
+      - TRACING_LLM_DEBUG_EXPORT=${TRACING_LLM_DEBUG_EXPORT:-false}
+
+      # Langfuse (LLM tracing)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
 
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
       - TZ=${TZ:-UTC}
@@ -145,7 +159,6 @@ services:
 
       # OpenTelemetry - Full pipeline (traces + logs + metrics)
       # Use this when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
@@ -153,7 +166,6 @@ services:
 
       # OpenTelemetry - Traces only
       # Use this when traces go to Tempo or Elastic APM, and logs are handled elsewhere (e.g., Loki).
-      # - OTEL_SDK_DISABLED=false
       # - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-n8n}
       # - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       # - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
@@ -165,6 +177,15 @@ services:
 
       # OpenTelemetry - Tracing Level
       - TRACING_LOG_LEVEL=${TRACING_LOG_LEVEL:-info}
+      - TRACING_WORKFLOW_ENABLED=${TRACING_WORKFLOW_ENABLED:-false}
+      - TRACING_LLM_ENABLED=${TRACING_LLM_ENABLED:-false}
+      - TRACING_LLM_DEBUG_EVENTS=${TRACING_LLM_DEBUG_EVENTS:-false}
+      - TRACING_LLM_DEBUG_EXPORT=${TRACING_LLM_DEBUG_EXPORT:-false}
+
+      # Langfuse (LLM tracing)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
 
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
       - TZ=${TZ:-UTC}

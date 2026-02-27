@@ -9,6 +9,15 @@ on:
         description: "n8n version (ex: 2.6.4). Leave empty or use 'latest' to resolve from releases."
         required: false
         type: string
+      tag_suffix:
+        description: "Optional tag suffix (ex: beta -> 2.6.4-beta)"
+        required: false
+        type: string
+      force_update:
+        description: "Force rebuild even if the tag already exists"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           INPUT_VERSION="${{ github.event.inputs.n8n_version || '' }}"
+          INPUT_SUFFIX="${{ github.event.inputs.tag_suffix || '' }}"
           TAG_LATEST="false"
           if [ -z "$INPUT_VERSION" ] || [ "$INPUT_VERSION" = "latest" ]; then
             TAG="$(curl -s https://api.github.com/repos/n8n-io/n8n/releases/latest | jq -r '.tag_name')"
@@ -55,13 +65,22 @@ jobs:
             VERSION="${VERSION#n8n@}"
             VERSION="${VERSION#v}"
           fi
-          TAGS="${IMAGE_NAME}:${VERSION}"
-          if [ "$TAG_LATEST" = "true" ]; then
+          SUFFIX="$INPUT_SUFFIX"
+          SUFFIX="${SUFFIX#-}"
+          if [ -n "$SUFFIX" ]; then
+            VERSION_TAG="${VERSION}-${SUFFIX}"
+          else
+            VERSION_TAG="${VERSION}"
+          fi
+          TAGS="${IMAGE_NAME}:${VERSION_TAG}"
+          if [ "$TAG_LATEST" = "true" ] && [ -z "$SUFFIX" ]; then
             TAGS="${TAGS}\n${IMAGE_NAME}:latest"
           fi
           {
             echo "version=$VERSION"
+            echo "version_tag=$VERSION_TAG"
             echo "tag_latest=$TAG_LATEST"
+            echo "tag_suffix=$SUFFIX"
             echo "tags<<EOF"
             printf "%b\n" "$TAGS"
             echo "EOF"
@@ -71,15 +90,22 @@ jobs:
         id: exists
         run: |
           set -euo pipefail
-          IMAGE_VERSION="${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
-          if docker manifest inspect "$IMAGE_VERSION" >/dev/null 2>&1; then
+          FORCE_UPDATE="${{ github.event.inputs.force_update || 'false' }}"
+          if [ "$FORCE_UPDATE" = "true" ]; then
+            echo "exists_version=false" >> "$GITHUB_OUTPUT"
+            echo "exists_latest=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION_TAG="${{ steps.version.outputs.version_tag }}"
+          if curl -fsSL "https://hub.docker.com/v2/repositories/${{ env.IMAGE_NAME }}/tags/${VERSION_TAG}/" >/dev/null; then
             echo "exists_version=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists_version=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ "${{ steps.version.outputs.tag_latest }}" = "true" ]; then
-            IMAGE_LATEST="${{ env.IMAGE_NAME }}:latest"
-            if docker manifest inspect "$IMAGE_LATEST" >/dev/null 2>&1; then
+
+          if [ "${{ steps.version.outputs.tag_latest }}" = "true" ] && [ -z "${{ steps.version.outputs.tag_suffix }}" ]; then
+            if curl -fsSL "https://hub.docker.com/v2/repositories/${{ env.IMAGE_NAME }}/tags/latest/" >/dev/null; then
               echo "exists_latest=true" >> "$GITHUB_OUTPUT"
             else
               echo "exists_latest=false" >> "$GITHUB_OUTPUT"
@@ -89,7 +115,7 @@ jobs:
           fi
 
       - name: Build and push
-        if: steps.exists.outputs.exists_version != 'true' || (steps.version.outputs.tag_latest == 'true' && steps.exists.outputs.exists_latest != 'true')
+        if: steps.exists.outputs.exists_version != 'true' || (steps.version.outputs.tag_latest == 'true' && steps.exists.outputs.exists_latest != 'true') || github.event.inputs.force_update == 'true'
         uses: docker/build-push-action@v6
         with:
           context: ./build
@@ -100,6 +126,6 @@ jobs:
             N8N_VERSION=${{ steps.version.outputs.version }}
 
       - name: Skip build (image already exists)
-        if: steps.exists.outputs.exists_version == 'true' && (steps.version.outputs.tag_latest != 'true' || steps.exists.outputs.exists_latest == 'true')
+        if: github.event.inputs.force_update != 'true' && steps.exists.outputs.exists_version == 'true' && (steps.version.outputs.tag_latest != 'true' || steps.exists.outputs.exists_latest == 'true')
         run: |
-          echo "Image already exists for version ${{ steps.version.outputs.version }}. Skipping build."
+          echo "Image already exists for tag ${{ steps.version.outputs.version_tag }}. Skipping build."
