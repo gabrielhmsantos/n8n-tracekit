@@ -1,6 +1,7 @@
-# n8n 2.x.x + OpenTelemetry
+# n8n-tracekit (n8n 2.x.x + OpenTelemetry)
 
 OpenTelemetry‑enabled n8n image with ready‑to‑use tracing instrumentation.
+This stack is referred to as **n8n-tracekit**.
 
 ## Key Capabilities
 
@@ -14,6 +15,8 @@ OpenTelemetry‑enabled n8n image with ready‑to‑use tracing instrumentation.
 ![Honeycomb dashboard example](assets/honeycomb-dash-example.png)
 
 ![Honeycomb trace example](assets/honeycom-trace-example.png)
+
+![Langfuse trace example](assets/langfuse-trace-example.png)
 
 ## Docker Image
 
@@ -40,7 +43,7 @@ You must replace at least:
 - `N8N_RUNNERS_AUTH_TOKEN`
 - `N8N_HOST`, `N8N_EDITOR_BASE_URL`, `WEBHOOK_URL`
 
-## OpenTelemetry Configuration
+## Workflow Tracing - OpenTelemetry Configuration
 
 Use one of the scenarios below. Set them in your `.env`.
 
@@ -48,7 +51,7 @@ Scenario A: full pipeline (traces + logs + metrics)
 Use when your backend accepts logs and metrics (Honeycomb, Datadog, New Relic, etc.).
 
 ```bash
-OTEL_SDK_DISABLED=false
+TRACING_WORKFLOW_ENABLED=true
 OTEL_SERVICE_NAME=n8n
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
@@ -59,7 +62,7 @@ Scenario B: traces only
 Use when traces go to Tempo or Elastic APM and logs are handled elsewhere (e.g., Loki).
 
 ```bash
-OTEL_SDK_DISABLED=false
+TRACING_WORKFLOW_ENABLED=true
 OTEL_SERVICE_NAME=n8n
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://tempo.example.com
@@ -73,11 +76,34 @@ Authentication (if required):
 OTEL_EXPORTER_OTLP_HEADERS=authorization=change_me
 ```
 
-Tracing level:
+Tracing log levels (.env):
 
 ```bash
 TRACING_LOG_LEVEL=info
+OTEL_LOG_LEVEL=info
 ```
+
+## LLM Tracing - Langfuse Configuration
+
+```bash
+TRACING_LLM_ENABLED=true
+TRACING_LLM_DEBUG_EVENTS=false
+TRACING_LLM_DEBUG_EXPORT=false
+LANGFUSE_PUBLIC_KEY=pk-lf-your_public_key
+LANGFUSE_SECRET_KEY=sk-lf-your_secret_key
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+### Langfuse Notes
+
+Langfuse is supported via OTEL + custom LLM tracing.
+This image can generate Langfuse‑friendly traces and tool spans.
+
+## How We Capture Traces (Brief)
+
+- **Workflow tracing**: we hook into n8n execution lifecycle hooks to create `n8n.workflow.execute` and `n8n.node.execute` spans with input/output metadata.
+- **LLM tracing**: we listen to AI events (`ai-llm-generated-output`, `ai-tool-called`) and map them to Langfuse observations.
+  Tool spans are generated from `ai-tool-called` events.
 
 ## Requirements
 
