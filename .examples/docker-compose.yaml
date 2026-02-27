@@ -2,7 +2,7 @@ version: "3.7"
 
 services:
   main:
-    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-tracekit}:${N8N_IMAGE_TAG:-2.6.4}
     ports:
       - "${N8N_PORT:-5678}:5678"
     environment:
@@ -76,7 +76,7 @@ services:
       - n8n_data:/home/node/.n8n
 
   webhook:
-    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-tracekit}:${N8N_IMAGE_TAG:-2.6.4}
     command: webhook
     environment:
       - DB_TYPE=postgresdb
@@ -134,7 +134,7 @@ services:
       - TZ=${TZ:-UTC}
 
   worker:
-    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-otel}:${N8N_IMAGE_TAG:-2.6.4}
+    image: ${IMAGE_REPO:-gabrielhmsantos/n8n-tracekit}:${N8N_IMAGE_TAG:-2.6.4}
     command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-10}
     environment:
       - DB_TYPE=postgresdb

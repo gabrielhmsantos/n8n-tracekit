@@ -20,8 +20,8 @@ This stack is referred to as **n8n-tracekit**.
 
 ## Docker Image
 
-- Docker Hub: `gabrielhmsantos/n8n-otel`
-- Tags follow the n8n version (example: `gabrielhmsantos/n8n-otel:2.9.4`).
+- Docker Hub: `gabrielhmsantos/n8n-tracekit`
+- Tags follow the n8n version (example: `gabrielhmsantos/n8n-tracekit:2.9.4`).
 - `latest` is updated when the workflow runs without a specific version.
 
 ## Quick Start

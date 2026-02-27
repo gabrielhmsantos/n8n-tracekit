@@ -1,4 +1,4 @@
-name: Build n8n OTel image
+name: Build n8n-tracekit image
 
 on:
   schedule:
@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: gabrielhmsantos/n8n-otel
+  IMAGE_NAME: gabrielhmsantos/n8n-tracekit
 
 jobs:
   build:
