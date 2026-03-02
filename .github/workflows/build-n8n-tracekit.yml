@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       n8n_version:
-        description: "n8n version (ex: 2.6.4). Leave empty or use 'latest' to resolve from releases."
-        required: false
+        description: "n8n version (ex: 2.6.4). Only 2.6.x and 2.7.x are allowed in this compat branch."
+        required: true
         type: string
       tag_suffix:
         description: "Optional tag suffix (ex: beta -> 2.6.4-beta)"
@@ -51,19 +51,15 @@ jobs:
           INPUT_SUFFIX="${{ github.event.inputs.tag_suffix || '' }}"
           TAG_LATEST="false"
           if [ -z "$INPUT_VERSION" ] || [ "$INPUT_VERSION" = "latest" ]; then
-            TAG="$(curl -s https://api.github.com/repos/n8n-io/n8n/releases/latest | jq -r '.tag_name')"
-            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-              echo "Failed to resolve latest release tag" >&2
-              exit 1
-            fi
-            VERSION="$TAG"
-            VERSION="${VERSION#n8n@}"
-            VERSION="${VERSION#v}"
-            TAG_LATEST="true"
-          else
-            VERSION="$INPUT_VERSION"
-            VERSION="${VERSION#n8n@}"
-            VERSION="${VERSION#v}"
+            echo "This compat branch requires an explicit n8n_version and does not allow 'latest'." >&2
+            exit 1
+          fi
+          VERSION="$INPUT_VERSION"
+          VERSION="${VERSION#n8n@}"
+          VERSION="${VERSION#v}"
+          if [[ ! "$VERSION" =~ ^2\.(6|7)\.[0-9]+$ ]]; then
+            echo "Unsupported n8n version '${VERSION}'. Allowed versions are only 2.6.x and 2.7.x." >&2
+            exit 1
           fi
           SUFFIX="$INPUT_SUFFIX"
           SUFFIX="${SUFFIX#-}"
@@ -73,9 +69,6 @@ jobs:
             VERSION_TAG="${VERSION}"
           fi
           TAGS="${IMAGE_NAME}:${VERSION_TAG}"
-          if [ "$TAG_LATEST" = "true" ] && [ -z "$SUFFIX" ]; then
-            TAGS="${TAGS}\n${IMAGE_NAME}:latest"
-          fi
           {
             echo "version=$VERSION"
             echo "version_tag=$VERSION_TAG"

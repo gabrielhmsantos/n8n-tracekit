@@ -13,7 +13,6 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
   const BaseExecuteContext = resolveBaseExecuteContext()
 
   try {
-    // Import n8n core modules
     const { WorkflowExecute } = require('n8n-core')
 
     if (WorkflowExecute?.prototype?.__n8nOtelPatched) {
@@ -23,26 +22,35 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
       return
     }
 
-    /**
-     * Attach tracing via ExecutionLifecycleHooks to avoid wrapping node execution.
-     * This reduces side effects while keeping spans for all nodes.
-     */
     const originalSetupExecution = WorkflowExecute.prototype.setupExecution
     WorkflowExecute.prototype.setupExecution = function () {
       const setupResult = originalSetupExecution.apply(this, arguments)
       try {
         const hooks = setupResult?.hooks || this?.additionalData?.hooks
-        if (hooks && !hooks.__n8nOtelHooked) {
-          attachTracingHooks(hooks, { tracer, logPrefix, debug })
-          hooks.__n8nOtelHooked = true
-        }
+        const existingState = hooks?.__n8nOtelState
+        const state = existingState || ensureTracingState(this, tracer)
+        this.__n8nOtelState = state
+
         if (hooks) {
+          state.hooks = hooks
+          hooks.__n8nOtelState = state
+          hooks.__n8nOtelExecution = this
+          hooks.__n8nOtelNodeSpanStore = state.nodeSpanStore
+          hooks.__n8nOtelNodeSpanByName = state.nodeSpanByName
+          hooks.__n8nOtelSyntheticAgentSpans = state.syntheticAgentSpans
+          hooks.__n8nOtelToolInputStore = state.toolInputStore
+
           this.__n8nOtelHooks = hooks
           if (BaseExecuteContext?.prototype?.logAiEvent) {
             hooks.__n8nOtelLogAiEvent = BaseExecuteContext.prototype.logAiEvent
           }
           hooks.__n8nOtelAdditionalData = this?.additionalData
           hooks.__n8nOtelWorkflow = this?.workflow
+
+          if (!hooks.__n8nOtelHooked) {
+            attachTracingHooks(hooks, { tracer, logPrefix, debug })
+            hooks.__n8nOtelHooked = true
+          }
         }
       } catch (error) {
         console.warn(`${logPrefix}: Failed to attach lifecycle hooks: ${error.message}`)
@@ -50,40 +58,147 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
       return setupResult
     }
 
+    const originalProcessRunExecutionData = WorkflowExecute.prototype.processRunExecutionData
+    if (!WorkflowExecute.prototype.__n8nOtelProcessRunPatched) {
+      WorkflowExecute.prototype.processRunExecutionData = function () {
+        const hooks = this.__n8nOtelHooks || this?.additionalData?.hooks
+        const state = hooks?.__n8nOtelState || ensureTracingState(this, tracer)
+        this.__n8nOtelState = state
+        if (hooks && !hooks.__n8nOtelState) {
+          hooks.__n8nOtelState = state
+        }
+        if (hooks) {
+          state.hooks = hooks
+        }
+
+        const workflow = arguments?.[0] || this?.workflow
+        startWorkflowSpan(state, workflow, {
+          tracer,
+          logPrefix,
+          debug,
+          source: 'processRunExecutionData',
+        })
+
+        if (this?.additionalData?.restartExecutionId) {
+          markWorkflowResume(state, 'additionalData.restartExecutionId')
+        }
+
+        const parentCtx = state.workflowSpan
+          ? trace.setSpan(context.active(), state.workflowSpan)
+          : context.active()
+
+        let runResult
+        try {
+          runResult = context.with(parentCtx, () =>
+            originalProcessRunExecutionData.apply(this, arguments),
+          )
+        } catch (error) {
+          recordSpanError(state.workflowSpan, error)
+          finalizeExecutionState(state, { logPrefix, debug })
+          throw error
+        }
+
+        if (runResult && typeof runResult.then === 'function') {
+          runResult
+            .then((fullRunData) => {
+              const runError = fullRunData?.data?.resultData?.error
+              if (runError) {
+                recordSpanError(state.workflowSpan, runError)
+              }
+            })
+            .catch((error) => {
+              recordSpanError(state.workflowSpan, error)
+            })
+            .finally(() => {
+              finalizeExecutionState(state, { logPrefix, debug })
+            })
+          return runResult
+        }
+
+        finalizeExecutionState(state, { logPrefix, debug })
+        return runResult
+      }
+      WorkflowExecute.prototype.__n8nOtelProcessRunPatched = true
+    }
+
     const originalRunNode = WorkflowExecute.prototype.runNode
     if (!WorkflowExecute.prototype.__n8nOtelRunNodePatched) {
       WorkflowExecute.prototype.runNode = function () {
-        try {
-          const hooks = this.__n8nOtelHooks || this?.additionalData?.hooks
-          const nodeSpanStore = hooks?.__n8nOtelNodeSpanStore
-          if (!nodeSpanStore) {
-            return originalRunNode.apply(this, arguments)
-          }
+        const hooks = this.__n8nOtelHooks || this?.additionalData?.hooks
+        const state = hooks?.__n8nOtelState || ensureTracingState(this, tracer)
+        this.__n8nOtelState = state
+        if (hooks && !hooks.__n8nOtelState) {
+          hooks.__n8nOtelState = state
+        }
+        if (hooks) {
+          state.hooks = hooks
+        }
 
-          const executionIndex = (this?.additionalData?.currentNodeExecutionIndex ?? 0) - 1
-          const executionData = arguments?.[1]
-          const nodeType = executionData?.node?.type ?? ''
-          const toolInputStore = hooks?.__n8nOtelToolInputStore
-          if (toolInputStore && isToolNodeType(nodeType)) {
-            const toolInput = extractInputJson(executionData?.data)
-            if (toolInput !== undefined) {
-              toolInputStore.set(executionIndex, toolInput)
-            }
-          }
+        const executionIndex = (this?.additionalData?.currentNodeExecutionIndex ?? 0) - 1
+        const executionData = arguments?.[1]
+        const nodeType = executionData?.node?.type ?? ''
 
-          const nodeSpan = nodeSpanStore.get(executionIndex)
-          if (!nodeSpan) {
-            return originalRunNode.apply(this, arguments)
+        if (state.toolInputStore && isToolNodeType(nodeType)) {
+          const toolInput = extractInputJson(executionData?.data)
+          if (toolInput !== undefined) {
+            state.toolInputStore.set(executionIndex, toolInput)
           }
+        }
+
+        const existingNodeSpan = state.nodeSpanStore.get(executionIndex)
+        if (existingNodeSpan) {
           if (isAgentOrToolNode(nodeType)) {
             return originalRunNode.apply(this, arguments)
           }
-
-          const spanContext = trace.setSpan(context.active(), nodeSpan)
+          const spanContext = trace.setSpan(context.active(), existingNodeSpan)
           return context.with(spanContext, () => originalRunNode.apply(this, arguments))
-        } catch (error) {
+        }
+
+        if (!shouldUseRunNodeFallback(state)) {
           return originalRunNode.apply(this, arguments)
         }
+
+        const fallbackSpan = createFallbackNodeSpan({
+          tracer,
+          executionContext: this,
+          executionData,
+          workflowSpan: state.workflowSpan,
+        })
+
+        if (!fallbackSpan) {
+          return originalRunNode.apply(this, arguments)
+        }
+
+        state.fallbackNodeSpans.set(executionIndex, fallbackSpan)
+
+        const fallbackCtx = trace.setSpan(context.active(), fallbackSpan)
+        let runResult
+        try {
+          runResult = context.with(fallbackCtx, () => originalRunNode.apply(this, arguments))
+        } catch (error) {
+          recordSpanError(fallbackSpan, error)
+          finishFallbackNodeSpan(state, executionIndex, fallbackSpan)
+          throw error
+        }
+
+        if (runResult && typeof runResult.then === 'function') {
+          return runResult
+            .then((result) => {
+              setFallbackNodeOutput(fallbackSpan, result)
+              return result
+            })
+            .catch((error) => {
+              recordSpanError(fallbackSpan, error)
+              throw error
+            })
+            .finally(() => {
+              finishFallbackNodeSpan(state, executionIndex, fallbackSpan)
+            })
+        }
+
+        setFallbackNodeOutput(fallbackSpan, runResult)
+        finishFallbackNodeSpan(state, executionIndex, fallbackSpan)
+        return runResult
       }
       WorkflowExecute.prototype.__n8nOtelRunNodePatched = true
     }
@@ -92,6 +207,235 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
     console.log(`${logPrefix}: Workflow tracing patched successfully`)
   } catch (e) {
     console.error('Failed to set up n8n OpenTelemetry workflow tracing:', e)
+  }
+}
+
+function createTracingState(tracer) {
+  return {
+    tracer,
+    hooks: null,
+    workflowSpan: null,
+    nodeSpanStore: new Map(),
+    nodeSpanByName: new Map(),
+    syntheticAgentSpans: new Set(),
+    toolInputStore: new Map(),
+    fallbackNodeSpans: new Map(),
+    hookRegistration: {
+      workflowExecuteBefore: false,
+      workflowExecuteResume: false,
+      workflowExecuteAfter: false,
+      nodeExecuteBefore: false,
+      nodeExecuteAfter: false,
+    },
+    resumeRequested: false,
+    resumeApplied: false,
+    resumeSource: null,
+  }
+}
+
+function ensureTracingState(execution, tracer) {
+  if (execution?.__n8nOtelState) {
+    return execution.__n8nOtelState
+  }
+
+  const state = createTracingState(tracer)
+  if (execution && typeof execution === 'object') {
+    execution.__n8nOtelState = state
+  }
+  return state
+}
+
+function buildWorkflowAttributes(workflow) {
+  const wfData = workflow || {}
+  const workflowAttributes = {
+    'n8n.workflow.id': wfData?.id ?? '',
+    'n8n.workflow.name': wfData?.name ?? '',
+  }
+
+  const flattenedSettings = safeFlatten(wfData?.settings)
+  if (flattenedSettings) {
+    for (const [key, value] of Object.entries(flattenedSettings)) {
+      workflowAttributes[`n8n.workflow.settings.${key}`] =
+        typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+          ? value
+          : safeStringify(value)
+    }
+  }
+
+  return workflowAttributes
+}
+
+function startWorkflowSpan(
+  state,
+  workflow,
+  { tracer, logPrefix = '[Tracing]', debug = false, source = 'unknown' },
+) {
+  if (!state) return null
+
+  if (!state.workflowSpan) {
+    const workflowData =
+      workflow || state?.hooks?.__n8nOtelWorkflow || state?.hooks?.workflowData || {}
+    state.workflowSpan = tracer.startSpan('n8n.workflow.execute', {
+      attributes: buildWorkflowAttributes(workflowData),
+      kind: SpanKind.INTERNAL,
+    })
+    if (state.hooks) {
+      state.hooks.__n8nOtelWorkflowSpan = state.workflowSpan
+    }
+
+    if (debug) {
+      const workflowName = workflowData?.name || 'unknown'
+      console.debug(`${logPrefix}: starting n8n workflow via ${source}:`, workflowName)
+    }
+  }
+
+  applyWorkflowResumeMark(state)
+  return state.workflowSpan
+}
+
+function markWorkflowResume(state, source = 'unknown') {
+  if (!state) return
+  state.resumeRequested = true
+  if (!state.resumeSource) {
+    state.resumeSource = source
+  }
+  applyWorkflowResumeMark(state)
+}
+
+function applyWorkflowResumeMark(state) {
+  if (!state?.workflowSpan || !state.resumeRequested || state.resumeApplied) return
+
+  state.workflowSpan.setAttribute('n8n.workflow.resumed', true)
+  state.workflowSpan.addEvent('workflow.resume', {
+    source: state.resumeSource || 'unknown',
+  })
+  state.resumeApplied = true
+}
+
+function recordSpanError(span, error) {
+  if (!span || !error) return
+  try {
+    span.recordException(error)
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: String(error?.message || error),
+    })
+  } catch (recordError) {
+    // best effort
+  }
+}
+
+function finalizeExecutionState(state, { fullRunData, logPrefix = '[Tracing]', debug = false } = {}) {
+  if (!state) return
+
+  const workflowSpan = state.workflowSpan
+  if (workflowSpan) {
+    const runError = fullRunData?.data?.resultData?.error
+    if (runError) {
+      recordSpanError(workflowSpan, runError)
+    }
+
+    try {
+      workflowSpan.end()
+    } catch (error) {
+      if (debug) {
+        console.warn(`${logPrefix}: Failed to end workflow span: ${error.message}`)
+      }
+    }
+  }
+
+  state.workflowSpan = null
+  if (state.hooks) {
+    state.hooks.__n8nOtelWorkflowSpan = null
+  }
+
+  for (const span of state.syntheticAgentSpans) {
+    try {
+      span.end()
+    } catch (error) {
+      // best effort
+    }
+  }
+
+  for (const span of state.fallbackNodeSpans.values()) {
+    try {
+      span.end()
+    } catch (error) {
+      // best effort
+    }
+  }
+
+  state.syntheticAgentSpans.clear()
+  state.nodeSpanByName.clear()
+  state.nodeSpanStore.clear()
+  state.toolInputStore.clear()
+  state.fallbackNodeSpans.clear()
+
+  state.resumeRequested = false
+  state.resumeApplied = false
+  state.resumeSource = null
+}
+
+function shouldUseRunNodeFallback(state) {
+  const registration = state?.hookRegistration
+  if (!registration) return true
+
+  return !registration.nodeExecuteBefore && !registration.nodeExecuteAfter
+}
+
+function createFallbackNodeSpan({ tracer, executionContext, executionData, workflowSpan }) {
+  const node = executionData?.node
+  if (!node) return null
+
+  const nodeAttributes = {
+    'n8n.workflow.id': executionContext?.workflow?.id ?? executionContext?.workflowData?.id ?? 'unknown',
+    'n8n.execution.id': executionContext?.additionalData?.executionId ?? 'unknown',
+    'n8n.node.type': node?.type ?? 'unknown',
+    'n8n.node.name': node?.name ?? 'unknown',
+  }
+
+  const flattenedNode = safeFlatten(node)
+  if (flattenedNode) {
+    for (const [key, value] of Object.entries(flattenedNode)) {
+      if (typeof value === 'string' || typeof value === 'number') {
+        nodeAttributes[`n8n.node.${key}`] = value
+      } else {
+        nodeAttributes[`n8n.node.${key}`] = safeStringify(value)
+      }
+    }
+  }
+
+  const parentCtx = workflowSpan
+    ? trace.setSpan(context.active(), workflowSpan)
+    : context.active()
+
+  return tracer.startSpan(
+    'n8n.node.execute',
+    {
+      attributes: nodeAttributes,
+      kind: SpanKind.INTERNAL,
+    },
+    parentCtx,
+  )
+}
+
+function setFallbackNodeOutput(span, runNodeResult) {
+  if (!span || !runNodeResult || typeof runNodeResult !== 'object') return
+
+  const outputJson = extractOutputJson(runNodeResult?.data)
+  if (outputJson !== undefined) {
+    span.setAttribute('n8n.node.output_json', safeStringify(outputJson))
+  }
+}
+
+function finishFallbackNodeSpan(state, executionIndex, span) {
+  if (!span) return
+  try {
+    span.end()
+  } catch (error) {
+    // best effort
+  } finally {
+    state?.fallbackNodeSpans?.delete(executionIndex)
   }
 }
 
@@ -133,224 +477,230 @@ function safeStringify(value, { maxStringLength = 20000 } = {}) {
   }
 }
 
-function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
-  const nodeSpanStore = new Map()
-  const nodeSpanByName = new Map()
-  const syntheticAgentSpans = new Set()
-  const toolInputStore = new Map()
-  let workflowSpan = null
-  hooks.__n8nOtelNodeSpanStore = nodeSpanStore
-  hooks.__n8nOtelNodeSpanByName = nodeSpanByName
-  hooks.__n8nOtelSyntheticAgentSpans = syntheticAgentSpans
-  hooks.__n8nOtelToolInputStore = toolInputStore
-
-  const startWorkflowSpan = (workflow) => {
-    if (workflowSpan) return
-    const wfData = workflow || {}
-    const workflowId = wfData?.id ?? ''
-    const workflowName = wfData?.name ?? ''
-    const workflowAttributes = {
-      'n8n.workflow.id': workflowId,
-      'n8n.workflow.name': workflowName,
-      ...flatten(wfData?.settings ?? {}, {
-        delimiter: '.',
-        transformKey: (key) => `n8n.workflow.settings.${key}`,
-      }),
+function registerHook(hooks, hookName, handler, { state, logPrefix, debug }) {
+  try {
+    hooks.addHandler(hookName, handler)
+    if (
+      state?.hookRegistration &&
+      Object.prototype.hasOwnProperty.call(state.hookRegistration, hookName)
+    ) {
+      state.hookRegistration[hookName] = true
     }
-
-    workflowSpan = tracer.startSpan('n8n.workflow.execute', {
-      attributes: workflowAttributes,
-      kind: SpanKind.INTERNAL,
-    })
-    hooks.__n8nOtelWorkflowSpan = workflowSpan
-
+  } catch (error) {
     if (debug) {
-      console.debug(`${logPrefix}: starting n8n workflow via hooks:`, workflowName)
+      console.warn(`${logPrefix}: Failed to attach ${hookName} hook: ${error.message}`)
     }
   }
+}
 
-  hooks.addHandler('workflowExecuteBefore', function (workflow) {
-    startWorkflowSpan(workflow)
-  })
+function attachTracingHooks(hooks, { tracer, logPrefix, debug }) {
+  const state = hooks?.__n8nOtelState || createTracingState(tracer)
+  hooks.__n8nOtelState = state
+  state.hooks = hooks
 
-  hooks.addHandler('workflowExecuteResume', function (workflow) {
-    startWorkflowSpan(workflow)
-  })
+  hooks.__n8nOtelNodeSpanStore = state.nodeSpanStore
+  hooks.__n8nOtelNodeSpanByName = state.nodeSpanByName
+  hooks.__n8nOtelSyntheticAgentSpans = state.syntheticAgentSpans
+  hooks.__n8nOtelToolInputStore = state.toolInputStore
 
-  hooks.addHandler('workflowExecuteAfter', function (fullRunData) {
-    if (!workflowSpan) return
-    try {
-      const err = fullRunData?.data?.resultData?.error
-      if (err) {
-        workflowSpan.recordException(err)
-        workflowSpan.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: String(err.message || err),
-        })
+  registerHook(
+    hooks,
+    'workflowExecuteBefore',
+    function (workflow) {
+      startWorkflowSpan(state, workflow || this?.workflowData, {
+        tracer,
+        logPrefix,
+        debug,
+        source: 'workflowExecuteBefore',
+      })
+    },
+    { state, logPrefix, debug },
+  )
+
+  registerHook(
+    hooks,
+    'workflowExecuteResume',
+    function (workflow) {
+      startWorkflowSpan(state, workflow || this?.workflowData, {
+        tracer,
+        logPrefix,
+        debug,
+        source: 'workflowExecuteResume',
+      })
+      markWorkflowResume(state, 'workflowExecuteResume')
+    },
+    { state, logPrefix, debug },
+  )
+
+  registerHook(
+    hooks,
+    'workflowExecuteAfter',
+    function (fullRunData) {
+      finalizeExecutionState(state, { fullRunData, logPrefix, debug })
+    },
+    { state, logPrefix, debug },
+  )
+
+  registerHook(
+    hooks,
+    'nodeExecuteBefore',
+    function (nodeName, taskStartedData) {
+      const node = this?.workflowData?.nodes?.find((item) => item.name === nodeName)
+      const nodeType = node?.type ?? 'unknown'
+      const nodeAttributes = {
+        'n8n.workflow.id': this?.workflowData?.id ?? 'unknown',
+        'n8n.execution.id': this?.executionId ?? 'unknown',
+        'n8n.node.type': nodeType || 'unknown',
+        'n8n.node.name': nodeName ?? 'unknown',
       }
-    } catch (error) {
-      // best effort
-    } finally {
-      workflowSpan.end()
-      workflowSpan = null
-      hooks.__n8nOtelWorkflowSpan = null
-      for (const span of syntheticAgentSpans) {
-        try {
-          span.end()
-        } catch (error) {
-          // best effort
+
+      const flattenedNode = safeFlatten(node)
+      if (flattenedNode) {
+        for (const [key, value] of Object.entries(flattenedNode)) {
+          if (typeof value === 'string' || typeof value === 'number') {
+            nodeAttributes[`n8n.node.${key}`] = value
+          } else {
+            nodeAttributes[`n8n.node.${key}`] = safeStringify(value)
+          }
         }
       }
-      syntheticAgentSpans.clear()
-      nodeSpanByName.clear()
-      nodeSpanStore.clear()
-      toolInputStore.clear()
-    }
-  })
 
-  hooks.addHandler('nodeExecuteBefore', function (nodeName, taskStartedData) {
-    const node = this?.workflowData?.nodes?.find((item) => item.name === nodeName)
-    const nodeType = node?.type ?? 'unknown'
-    const nodeAttributes = {
-      'n8n.workflow.id': this?.workflowData?.id ?? 'unknown',
-      'n8n.execution.id': this?.executionId ?? 'unknown',
-      'n8n.node.type': nodeType || 'unknown',
-      'n8n.node.name': nodeName ?? 'unknown',
-    }
+      const existingSpan = state.nodeSpanByName.get(nodeName)
+      const agentParentName = resolveAgentParentName(this, nodeName, taskStartedData)
+      let parentSpan = state.workflowSpan
 
-    const flattenedNode = safeFlatten(node)
-    if (flattenedNode) {
-      for (const [key, value] of Object.entries(flattenedNode)) {
-        if (typeof value === 'string' || typeof value === 'number') {
-          nodeAttributes[`n8n.node.${key}`] = value
-        } else {
-          nodeAttributes[`n8n.node.${key}`] = safeStringify(value)
+      if (agentParentName) {
+        const agentSpan =
+          state.nodeSpanByName.get(agentParentName) ||
+          createSyntheticAgentSpan({
+            executionContext: this,
+            agentNodeName: agentParentName,
+            workflowSpan: state.workflowSpan,
+            tracer,
+            syntheticAgentSpans: state.syntheticAgentSpans,
+            nodeSpanByName: state.nodeSpanByName,
+            startTime: taskStartedData?.startTime,
+          })
+        if (agentSpan) {
+          parentSpan = agentSpan
         }
       }
-    }
 
-    const existingSpan = nodeSpanByName.get(nodeName)
-    const agentParentName = resolveAgentParentName(this, nodeName, taskStartedData)
-    let parentSpan = workflowSpan
+      const parentCtx = parentSpan
+        ? trace.setSpan(context.active(), parentSpan)
+        : context.active()
+      const nodeSpan =
+        existingSpan && state.syntheticAgentSpans.has(existingSpan)
+          ? existingSpan
+          : tracer.startSpan(
+              'n8n.node.execute',
+              {
+                attributes: nodeAttributes,
+                kind: SpanKind.INTERNAL,
+                startTime: taskStartedData?.startTime ? taskStartedData.startTime : undefined,
+              },
+              parentCtx,
+            )
 
-    if (agentParentName) {
-      const agentSpan =
-        nodeSpanByName.get(agentParentName) ||
-        createSyntheticAgentSpan({
-          executionContext: this,
-          agentNodeName: agentParentName,
-          workflowSpan,
-          tracer,
-          syntheticAgentSpans,
-          nodeSpanByName,
-          startTime: taskStartedData?.startTime,
-        })
-      if (agentSpan) {
-        parentSpan = agentSpan
-      }
-    }
+      state.nodeSpanStore.set(taskStartedData?.executionIndex, nodeSpan)
+      state.nodeSpanByName.set(nodeName, nodeSpan)
+    },
+    { state, logPrefix, debug },
+  )
 
-    const parentCtx = parentSpan
-      ? trace.setSpan(context.active(), parentSpan)
-      : context.active()
-    const nodeSpan =
-      existingSpan && syntheticAgentSpans.has(existingSpan)
-        ? existingSpan
-        : tracer.startSpan(
-            'n8n.node.execute',
-            {
-              attributes: nodeAttributes,
-              kind: SpanKind.INTERNAL,
-              startTime: taskStartedData?.startTime ? taskStartedData.startTime : undefined,
+  registerHook(
+    hooks,
+    'nodeExecuteAfter',
+    function (nodeName, taskData) {
+      const spanKey = taskData?.executionIndex
+      const existingSpan = state.nodeSpanStore.get(spanKey)
+      const fallbackSpan = state.nodeSpanByName.get(nodeName)
+      const node = this?.workflowData?.nodes?.find((item) => item.name === nodeName)
+      const nodeType = node?.type ?? ''
+
+      const nodeSpan =
+        existingSpan ||
+        fallbackSpan ||
+        tracer.startSpan(
+          'n8n.node.execute',
+          {
+            attributes: {
+              'n8n.workflow.id': this?.workflowData?.id ?? 'unknown',
+              'n8n.execution.id': this?.executionId ?? 'unknown',
+              'n8n.node.name': nodeName ?? 'unknown',
             },
-            parentCtx,
-          )
-    nodeSpanStore.set(taskStartedData?.executionIndex, nodeSpan)
-    nodeSpanByName.set(nodeName, nodeSpan)
-  })
-
-  hooks.addHandler('nodeExecuteAfter', function (nodeName, taskData) {
-    const spanKey = taskData?.executionIndex
-    const existingSpan = nodeSpanStore.get(spanKey)
-    const fallbackSpan = nodeSpanByName.get(nodeName)
-    const node = this?.workflowData?.nodes?.find((item) => item.name === nodeName)
-    const nodeType = node?.type ?? ''
-    const nodeSpan =
-      existingSpan ||
-      fallbackSpan ||
-      tracer.startSpan(
-        'n8n.node.execute',
-        {
-          attributes: {
-            'n8n.workflow.id': this?.workflowData?.id ?? 'unknown',
-            'n8n.execution.id': this?.executionId ?? 'unknown',
-            'n8n.node.name': nodeName ?? 'unknown',
+            kind: SpanKind.INTERNAL,
           },
-          kind: SpanKind.INTERNAL,
-        },
-        hooks.__n8nOtelWorkflowSpan
-          ? trace.setSpan(context.active(), hooks.__n8nOtelWorkflowSpan)
-          : context.active(),
-      )
+          state.workflowSpan
+            ? trace.setSpan(context.active(), state.workflowSpan)
+            : context.active(),
+        )
 
-    try {
-      if (taskData?.error) {
-        nodeSpan.recordException(taskData.error)
-        nodeSpan.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: String(taskData.error.message || taskData.error),
-        })
-      }
+      try {
+        if (taskData?.error) {
+          recordSpanError(nodeSpan, taskData.error)
+        }
 
-      if (isToolNodeName(this?.workflowData, nodeName) || isToolNodeType(nodeType)) {
-        const toolInput = toolInputStore.get(spanKey)
-        const toolOutput = extractOutputJson(taskData?.data)
-        const logAiEvent = hooks.__n8nOtelLogAiEvent
-        if (typeof logAiEvent === 'function') {
-          const agentParentName = resolveAgentParentName(this, nodeName, taskData)
-          const agentNode =
-            agentParentName &&
-            this?.workflowData?.nodes?.find((item) => item.name === agentParentName)
-          const fakeContext = {
-            additionalData: hooks.__n8nOtelAdditionalData,
-            node: node || { name: nodeName, type: nodeType },
-            workflow: hooks.__n8nOtelWorkflow || this?.workflowData,
-            parentNode: agentNode,
-          }
-          const payload = {
-            input: toolInput,
-            response: toolOutput,
-            tool: { name: nodeName },
-            _source: 'workflow-tool',
-            _executionIndex: spanKey,
-          }
-          try {
-            logAiEvent.call(fakeContext, 'ai-tool-called', safeStringify(payload))
-          } catch (error) {
-            if (debug) {
-              console.warn(`${logPrefix}: Failed to emit tool event: ${error.message}`)
+        if (isToolNodeName(this?.workflowData, nodeName) || isToolNodeType(nodeType)) {
+          const toolInput = state.toolInputStore.get(spanKey)
+          const toolOutput = extractOutputJson(taskData?.data)
+          const logAiEvent = hooks.__n8nOtelLogAiEvent
+          if (typeof logAiEvent === 'function') {
+            const agentParentName = resolveAgentParentName(this, nodeName, taskData)
+            const agentNode =
+              agentParentName &&
+              this?.workflowData?.nodes?.find((item) => item.name === agentParentName)
+            const fakeContext = {
+              additionalData: hooks.__n8nOtelAdditionalData,
+              node: node || { name: nodeName, type: nodeType },
+              workflow: hooks.__n8nOtelWorkflow || this?.workflowData,
+              parentNode: agentNode,
+            }
+            const payload = {
+              input: toolInput,
+              response: toolOutput,
+              tool: { name: nodeName },
+              _source: 'workflow-tool',
+              _executionIndex: spanKey,
+            }
+            try {
+              logAiEvent.call(fakeContext, 'ai-tool-called', safeStringify(payload))
+            } catch (error) {
+              if (debug) {
+                console.warn(`${logPrefix}: Failed to emit tool event: ${error.message}`)
+              }
             }
           }
         }
-      }
 
-      const outputJson = extractOutputJson(taskData?.data)
-      if (outputJson !== undefined) {
-        nodeSpan.setAttribute('n8n.node.output_json', safeStringify(outputJson))
+        const outputJson = extractOutputJson(taskData?.data)
+        if (outputJson !== undefined) {
+          nodeSpan.setAttribute('n8n.node.output_json', safeStringify(outputJson))
+        }
+      } catch (error) {
+        console.warn('Failed to set node output attributes: ', error)
+      } finally {
+        try {
+          nodeSpan.end()
+        } catch (error) {
+          // best effort
+        }
+
+        state.nodeSpanStore.delete(spanKey)
+        state.toolInputStore.delete(spanKey)
+        state.fallbackNodeSpans.delete(spanKey)
+
+        if (state.nodeSpanByName.get(nodeName) === nodeSpan) {
+          state.nodeSpanByName.delete(nodeName)
+        }
+
+        if (state.syntheticAgentSpans.has(nodeSpan)) {
+          state.syntheticAgentSpans.delete(nodeSpan)
+        }
       }
-    } catch (error) {
-      console.warn('Failed to set node output attributes: ', error)
-    } finally {
-      nodeSpan.end()
-      nodeSpanStore.delete(spanKey)
-      if (nodeSpanByName.get(nodeName) === nodeSpan) {
-        nodeSpanByName.delete(nodeName)
-      }
-      if (syntheticAgentSpans.has(nodeSpan)) {
-        syntheticAgentSpans.delete(nodeSpan)
-      }
-    }
-  })
+    },
+    { state, logPrefix, debug },
+  )
 }
 
 function extractOutputJson(taskDataConnections) {
