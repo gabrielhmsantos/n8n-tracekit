@@ -290,44 +290,44 @@ jobs:
             TRUNCATED_NOTE="Yes (showing ${SELECTED_COMMITS} of ${TOTAL_COMMITS} commits)"
           fi
 
-          cat > .github/release_prompt.txt <<EOF_PROMPT
-You are a release notes assistant.
-Generate release notes in English only, in valid Markdown.
-
-Use EXACTLY this heading structure and order:
-1) # Release ${NEXT_VERSION}
-2) ## Summary
-3) ## Highlights
-4) ## Fixes
-5) ## Breaking Changes
-6) ## Compatibility
-   - Minimum version: ...
-   - Recommended version: ...
-7) ## Maintenance Policy
-8) ## Included Commits
-
-Rules:
-- Do not invent features.
-- Keep content factual and concise.
-- If there are no breaking changes, write "None.".
-- Keep commit bullets in Included Commits.
-
-Context:
-- Release type: ${RELEASE_TYPE}
-- Baseline mode: ${BASELINE_MODE}
-- Baseline tag: ${BASELINE_TAG:-N/A}
-- Baseline commit: ${BASELINE_COMMIT:-N/A}
-- Commit range: ${RANGE_SPEC}
-- Commit list truncated: ${TRUNCATED_NOTE}
-- Recommended version: ${RECOMMENDED_VERSION}
-- Minimum version: ${MINIMUM_VERSION}
-- Maintained current line: ${MAINTAINED_CURRENT_LINE}
-- Maintained previous line: ${MAINTAINED_PREVIOUS_LINE}
-- Deprecated lines: ${DEPRECATED_LINES}
-
-Commits:
-${COMMITS_MD}
-EOF_PROMPT
+          {
+            echo "You are a release notes assistant."
+            echo "Generate release notes in English only, in valid Markdown."
+            echo
+            echo "Use EXACTLY this heading structure and order:"
+            echo "1) # Release ${NEXT_VERSION}"
+            echo "2) ## Summary"
+            echo "3) ## Highlights"
+            echo "4) ## Fixes"
+            echo "5) ## Breaking Changes"
+            echo "6) ## Compatibility"
+            echo "   - Minimum version: ..."
+            echo "   - Recommended version: ..."
+            echo "7) ## Maintenance Policy"
+            echo "8) ## Included Commits"
+            echo
+            echo "Rules:"
+            echo "- Do not invent features."
+            echo "- Keep content factual and concise."
+            echo "- If there are no breaking changes, write \"None.\"."
+            echo "- Keep commit bullets in Included Commits."
+            echo
+            echo "Context:"
+            echo "- Release type: ${RELEASE_TYPE}"
+            echo "- Baseline mode: ${BASELINE_MODE}"
+            echo "- Baseline tag: ${BASELINE_TAG:-N/A}"
+            echo "- Baseline commit: ${BASELINE_COMMIT:-N/A}"
+            echo "- Commit range: ${RANGE_SPEC}"
+            echo "- Commit list truncated: ${TRUNCATED_NOTE}"
+            echo "- Recommended version: ${RECOMMENDED_VERSION}"
+            echo "- Minimum version: ${MINIMUM_VERSION}"
+            echo "- Maintained current line: ${MAINTAINED_CURRENT_LINE}"
+            echo "- Maintained previous line: ${MAINTAINED_PREVIOUS_LINE}"
+            echo "- Deprecated lines: ${DEPRECATED_LINES}"
+            echo
+            echo "Commits:"
+            echo "${COMMITS_MD}"
+          } > .github/release_prompt.txt
 
           LLM_SUCCESS="false"
           if [ -n "${RELEASE_LLM_ENDPOINT:-}" ] && [ -n "${RELEASE_LLM_MODEL:-}" ] && [ -n "${RELEASE_LLM_API_KEY:-}" ]; then
@@ -361,36 +361,36 @@ EOF_PROMPT
           fi
 
           if [ "$LLM_SUCCESS" != "true" ]; then
-            cat > "$RELEASE_NOTES_FILE" <<EOF_FALLBACK
-# Release ${NEXT_VERSION}
-
-## Summary
-This release includes updates from the selected commit range for ${GITHUB_REPOSITORY}.
-
-## Highlights
-- Release type: ${RELEASE_TYPE}
-- Baseline mode: ${BASELINE_MODE}
-- Commit range: ${RANGE_SPEC}
-- Commit list truncated: ${TRUNCATED_NOTE}
-
-## Fixes
-- See included commits for detailed changes.
-
-## Breaking Changes
-None.
-
-## Compatibility
-- Minimum version: ${MINIMUM_VERSION}
-- Recommended version: ${RECOMMENDED_VERSION}
-
-## Maintenance Policy
-- Current maintained line: ${MAINTAINED_CURRENT_LINE}
-- Previous maintained line: ${MAINTAINED_PREVIOUS_LINE}
-- Deprecated lines: ${DEPRECATED_LINES}
-
-## Included Commits
-${COMMITS_MD}
-EOF_FALLBACK
+            {
+              echo "# Release ${NEXT_VERSION}"
+              echo
+              echo "## Summary"
+              echo "This release includes updates from the selected commit range for ${GITHUB_REPOSITORY}."
+              echo
+              echo "## Highlights"
+              echo "- Release type: ${RELEASE_TYPE}"
+              echo "- Baseline mode: ${BASELINE_MODE}"
+              echo "- Commit range: ${RANGE_SPEC}"
+              echo "- Commit list truncated: ${TRUNCATED_NOTE}"
+              echo
+              echo "## Fixes"
+              echo "- See included commits for detailed changes."
+              echo
+              echo "## Breaking Changes"
+              echo "None."
+              echo
+              echo "## Compatibility"
+              echo "- Minimum version: ${MINIMUM_VERSION}"
+              echo "- Recommended version: ${RECOMMENDED_VERSION}"
+              echo
+              echo "## Maintenance Policy"
+              echo "- Current maintained line: ${MAINTAINED_CURRENT_LINE}"
+              echo "- Previous maintained line: ${MAINTAINED_PREVIOUS_LINE}"
+              echo "- Deprecated lines: ${DEPRECATED_LINES}"
+              echo
+              echo "## Included Commits"
+              echo "${COMMITS_MD}"
+            } > "$RELEASE_NOTES_FILE"
           fi
 
           echo "llm_success=${LLM_SUCCESS}" >> "$GITHUB_OUTPUT"
