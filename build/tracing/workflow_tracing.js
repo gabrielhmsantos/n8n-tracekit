@@ -83,15 +83,9 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
           markWorkflowResume(state, 'additionalData.restartExecutionId')
         }
 
-        const parentCtx = state.workflowSpan
-          ? trace.setSpan(context.active(), state.workflowSpan)
-          : context.active()
-
         let runResult
         try {
-          runResult = context.with(parentCtx, () =>
-            originalProcessRunExecutionData.apply(this, arguments),
-          )
+          runResult = originalProcessRunExecutionData.apply(this, arguments)
         } catch (error) {
           recordSpanError(state.workflowSpan, error)
           finalizeExecutionState(state, { logPrefix, debug })
@@ -155,6 +149,10 @@ function setupWorkflowTracing({ logPrefix = '[Tracing]', debug = false } = {}) {
         }
 
         if (!shouldUseRunNodeFallback(state)) {
+          return originalRunNode.apply(this, arguments)
+        }
+
+        if (isAgentOrToolNode(nodeType)) {
           return originalRunNode.apply(this, arguments)
         }
 
