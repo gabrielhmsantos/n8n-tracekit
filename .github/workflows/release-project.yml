@@ -1,0 +1,416 @@
+name: Generate Project Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release increment type"
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      release_line:
+        description: "Target maintenance line for patch releases (format: X.Y, example: 0.1)"
+        required: false
+        type: string
+      recommended_version:
+        description: "Recommended version shown in release notes"
+        required: true
+        type: string
+      minimum_version:
+        description: "Minimum supported version shown in release notes"
+        required: false
+        type: string
+      force_all_commits:
+        description: "Ignore baseline and include all branch commits in notes"
+        required: false
+        default: false
+        type: boolean
+      notes_max_commits:
+        description: "Maximum number of commits sent to the LLM"
+        required: false
+        default: 200
+        type: number
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_NOTES_FILE: release_notes.md
+  COMMITS_TSV_FILE: .github/release_commits.tsv
+  COMMITS_MD_FILE: .github/release_commits.md
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+          RELEASE_LINE: ${{ github.event.inputs.release_line }}
+          RECOMMENDED_VERSION: ${{ github.event.inputs.recommended_version }}
+          MINIMUM_VERSION: ${{ github.event.inputs.minimum_version }}
+          FORCE_ALL_COMMITS: ${{ github.event.inputs.force_all_commits }}
+          NOTES_MAX_COMMITS: ${{ github.event.inputs.notes_max_commits }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RECOMMENDED_VERSION:-}" ]; then
+            echo "recommended_version is required" >&2
+            exit 1
+          fi
+
+          NOTES_MAX_COMMITS="${NOTES_MAX_COMMITS:-200}"
+          if ! [[ "$NOTES_MAX_COMMITS" =~ ^[0-9]+$ ]] || [ "$NOTES_MAX_COMMITS" -le 0 ]; then
+            echo "notes_max_commits must be a positive integer" >&2
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          git fetch --no-tags origin main:refs/remotes/origin/main || true
+
+          mapfile -t SEMVER_TAGS < <(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V)
+
+          NEXT_VERSION=""
+          if [ "${#SEMVER_TAGS[@]}" -eq 0 ]; then
+            NEXT_VERSION="v0.1.0"
+          else
+            LATEST_GLOBAL="${SEMVER_TAGS[-1]}"
+            IFS='.' read -r LATEST_MAJOR LATEST_MINOR LATEST_PATCH <<<"${LATEST_GLOBAL#v}"
+
+            case "$RELEASE_TYPE" in
+              major)
+                NEXT_VERSION="v$((LATEST_MAJOR + 1)).0.0"
+                ;;
+              minor)
+                NEXT_VERSION="v${LATEST_MAJOR}.$((LATEST_MINOR + 1)).0"
+                ;;
+              patch)
+                if [ -z "${RELEASE_LINE:-}" ]; then
+                  echo "release_line is required for patch releases" >&2
+                  exit 1
+                fi
+                if ! [[ "$RELEASE_LINE" =~ ^[0-9]+\.[0-9]+$ ]]; then
+                  echo "release_line must match X.Y (example: 0.1)" >&2
+                  exit 1
+                fi
+
+                mapfile -t EXISTING_LINES < <(
+                  printf '%s\n' "${SEMVER_TAGS[@]}" \
+                    | sed -E 's/^v([0-9]+\.[0-9]+)\.[0-9]+$/\1/' \
+                    | sort -u -V
+                )
+
+                CURRENT_LINE="${EXISTING_LINES[-1]}"
+                PREVIOUS_LINE=""
+                if [ "${#EXISTING_LINES[@]}" -ge 2 ]; then
+                  PREVIOUS_LINE="${EXISTING_LINES[-2]}"
+                fi
+
+                if [ "$RELEASE_LINE" != "$CURRENT_LINE" ] && [ "$RELEASE_LINE" != "$PREVIOUS_LINE" ]; then
+                  echo "Patch releases are only allowed for maintained lines: current=${CURRENT_LINE}, previous=${PREVIOUS_LINE:-N/A}" >&2
+                  exit 1
+                fi
+
+                LINE_REGEX="${RELEASE_LINE//./\\.}"
+                mapfile -t LINE_PATCHES < <(
+                  printf '%s\n' "${SEMVER_TAGS[@]}" \
+                    | sed -nE "s/^v${LINE_REGEX}\.([0-9]+)$/\\1/p" \
+                    | sort -n
+                )
+
+                if [ "${#LINE_PATCHES[@]}" -eq 0 ]; then
+                  echo "No existing tags found for release_line ${RELEASE_LINE}" >&2
+                  exit 1
+                fi
+
+                MAX_PATCH="${LINE_PATCHES[-1]}"
+                NEXT_VERSION="v${RELEASE_LINE}.$((MAX_PATCH + 1))"
+                ;;
+              *)
+                echo "Unsupported release_type: ${RELEASE_TYPE}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${NEXT_VERSION}" >/dev/null; then
+            echo "Tag ${NEXT_VERSION} already exists" >&2
+            exit 1
+          fi
+
+          mapfile -t ALL_LINES < <(
+            {
+              if [ "${#SEMVER_TAGS[@]}" -gt 0 ]; then
+                printf '%s\n' "${SEMVER_TAGS[@]}" | sed -E 's/^v([0-9]+\.[0-9]+)\.[0-9]+$/\1/'
+              fi
+              echo "${NEXT_VERSION#v}" | sed -E 's/^([0-9]+\.[0-9]+)\.[0-9]+$/\1/'
+            } | awk 'NF' | sort -u -V
+          )
+
+          MAINTAINED_CURRENT_LINE="${ALL_LINES[-1]}"
+          MAINTAINED_PREVIOUS_LINE="N/A"
+          if [ "${#ALL_LINES[@]}" -ge 2 ]; then
+            MAINTAINED_PREVIOUS_LINE="${ALL_LINES[-2]}"
+          fi
+
+          DEPRECATED_LINES="None"
+          if [ "${#ALL_LINES[@]}" -gt 2 ]; then
+            DEPRECATED_COUNT=$((${#ALL_LINES[@]} - 2))
+            DEPRECATED_LINES="$(printf '%s\n' "${ALL_LINES[@]:0:${DEPRECATED_COUNT}}" | paste -sd ', ' -)"
+          fi
+
+          BASELINE_MODE="force_all"
+          BASELINE_TAG=""
+          BASELINE_COMMIT=""
+
+          if [ "${FORCE_ALL_COMMITS}" != "true" ]; then
+            RELEASES_JSON="$({
+              curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100";
+            } || echo '[]')"
+
+            while IFS= read -r RELEASE_ITEM; do
+              TARGET_COMMITISH="$(jq -r '.target_commitish // ""' <<<"$RELEASE_ITEM")"
+              IS_DRAFT="$(jq -r '.draft // false' <<<"$RELEASE_ITEM")"
+              TAG_NAME="$(jq -r '.tag_name // ""' <<<"$RELEASE_ITEM")"
+
+              if [ "$IS_DRAFT" = "true" ]; then
+                continue
+              fi
+
+              if [ "$TARGET_COMMITISH" != "$CURRENT_BRANCH" ]; then
+                continue
+              fi
+
+              TAG_COMMIT="$(git rev-list -n 1 "$TAG_NAME" 2>/dev/null || true)"
+              if [ -z "$TAG_COMMIT" ]; then
+                continue
+              fi
+
+              if git merge-base --is-ancestor "$TAG_COMMIT" HEAD; then
+                BASELINE_MODE="branch_release"
+                BASELINE_TAG="$TAG_NAME"
+                BASELINE_COMMIT="$TAG_COMMIT"
+                break
+              fi
+            done < <(jq -c '.[]' <<<"$RELEASES_JSON")
+
+            if [ -z "$BASELINE_COMMIT" ]; then
+              MERGE_BASE="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+              HEAD_SHA="$(git rev-parse HEAD)"
+              if [ -n "$MERGE_BASE" ] && [ "$MERGE_BASE" != "$HEAD_SHA" ]; then
+                BASELINE_MODE="merge_base_main"
+                BASELINE_COMMIT="$MERGE_BASE"
+              else
+                BASELINE_MODE="all_commits_fallback"
+              fi
+            fi
+          fi
+
+          RANGE_SPEC="HEAD"
+          if [ -n "$BASELINE_COMMIT" ]; then
+            RANGE_SPEC="${BASELINE_COMMIT}..HEAD"
+          fi
+
+          TOTAL_COMMITS="$(git rev-list --first-parent --no-merges --count $RANGE_SPEC)"
+          if [ "$TOTAL_COMMITS" -eq 0 ]; then
+            echo "No commits found for release range: $RANGE_SPEC" >&2
+            exit 1
+          fi
+
+          git log \
+            --first-parent \
+            --no-merges \
+            --date=short \
+            --pretty=format:'%H%x09%h%x09%ad%x09%an%x09%s' \
+            $RANGE_SPEC \
+            | awk -v limit="$NOTES_MAX_COMMITS" 'NR <= limit' > "$COMMITS_TSV_FILE"
+
+          SELECTED_COMMITS="$(wc -l < "$COMMITS_TSV_FILE" | tr -d ' ')"
+
+          awk -F '\t' '{printf "- `%s` %s (%s, %s)\n", $2, $5, $4, $3}' "$COMMITS_TSV_FILE" > "$COMMITS_MD_FILE"
+
+          if [ -z "${MINIMUM_VERSION:-}" ]; then
+            MINIMUM_VERSION="N/A"
+          fi
+
+          {
+            echo "next_version=$NEXT_VERSION"
+            echo "baseline_mode=$BASELINE_MODE"
+            echo "baseline_tag=$BASELINE_TAG"
+            echo "baseline_commit=$BASELINE_COMMIT"
+            echo "range_spec=$RANGE_SPEC"
+            echo "total_commits=$TOTAL_COMMITS"
+            echo "selected_commits=$SELECTED_COMMITS"
+            echo "maintained_current_line=$MAINTAINED_CURRENT_LINE"
+            echo "maintained_previous_line=$MAINTAINED_PREVIOUS_LINE"
+            echo "deprecated_lines=$DEPRECATED_LINES"
+            echo "minimum_version=$MINIMUM_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes (English)
+        id: notes
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+          RECOMMENDED_VERSION: ${{ github.event.inputs.recommended_version }}
+          MINIMUM_VERSION: ${{ steps.meta.outputs.minimum_version }}
+          NEXT_VERSION: ${{ steps.meta.outputs.next_version }}
+          BASELINE_MODE: ${{ steps.meta.outputs.baseline_mode }}
+          BASELINE_TAG: ${{ steps.meta.outputs.baseline_tag }}
+          BASELINE_COMMIT: ${{ steps.meta.outputs.baseline_commit }}
+          RANGE_SPEC: ${{ steps.meta.outputs.range_spec }}
+          TOTAL_COMMITS: ${{ steps.meta.outputs.total_commits }}
+          SELECTED_COMMITS: ${{ steps.meta.outputs.selected_commits }}
+          MAINTAINED_CURRENT_LINE: ${{ steps.meta.outputs.maintained_current_line }}
+          MAINTAINED_PREVIOUS_LINE: ${{ steps.meta.outputs.maintained_previous_line }}
+          DEPRECATED_LINES: ${{ steps.meta.outputs.deprecated_lines }}
+          RELEASE_LLM_ENDPOINT: ${{ secrets.RELEASE_LLM_ENDPOINT }}
+          RELEASE_LLM_MODEL: ${{ secrets.RELEASE_LLM_MODEL }}
+          RELEASE_LLM_API_KEY: ${{ secrets.RELEASE_LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          COMMITS_MD="$(cat "$COMMITS_MD_FILE")"
+          TRUNCATED_NOTE="No"
+          if [ "$SELECTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
+            TRUNCATED_NOTE="Yes (showing ${SELECTED_COMMITS} of ${TOTAL_COMMITS} commits)"
+          fi
+
+          cat > .github/release_prompt.txt <<EOF_PROMPT
+You are a release notes assistant.
+Generate release notes in English only, in valid Markdown.
+
+Use EXACTLY this heading structure and order:
+1) # Release ${NEXT_VERSION}
+2) ## Summary
+3) ## Highlights
+4) ## Fixes
+5) ## Breaking Changes
+6) ## Compatibility
+   - Minimum version: ...
+   - Recommended version: ...
+7) ## Maintenance Policy
+8) ## Included Commits
+
+Rules:
+- Do not invent features.
+- Keep content factual and concise.
+- If there are no breaking changes, write "None.".
+- Keep commit bullets in Included Commits.
+
+Context:
+- Release type: ${RELEASE_TYPE}
+- Baseline mode: ${BASELINE_MODE}
+- Baseline tag: ${BASELINE_TAG:-N/A}
+- Baseline commit: ${BASELINE_COMMIT:-N/A}
+- Commit range: ${RANGE_SPEC}
+- Commit list truncated: ${TRUNCATED_NOTE}
+- Recommended version: ${RECOMMENDED_VERSION}
+- Minimum version: ${MINIMUM_VERSION}
+- Maintained current line: ${MAINTAINED_CURRENT_LINE}
+- Maintained previous line: ${MAINTAINED_PREVIOUS_LINE}
+- Deprecated lines: ${DEPRECATED_LINES}
+
+Commits:
+${COMMITS_MD}
+EOF_PROMPT
+
+          LLM_SUCCESS="false"
+          if [ -n "${RELEASE_LLM_ENDPOINT:-}" ] && [ -n "${RELEASE_LLM_MODEL:-}" ] && [ -n "${RELEASE_LLM_API_KEY:-}" ]; then
+            CHAT_COMPLETIONS_URL="${RELEASE_LLM_ENDPOINT%/}/chat/completions"
+
+            REQUEST_BODY="$(jq -n \
+              --arg model "$RELEASE_LLM_MODEL" \
+              --arg system "You write high-quality software release notes in English Markdown." \
+              --arg user "$(cat .github/release_prompt.txt)" \
+              '{
+                model: $model,
+                temperature: 0.2,
+                messages: [
+                  { role: "system", content: $system },
+                  { role: "user", content: $user }
+                ]
+              }'
+            )"
+
+            if RESPONSE="$(curl -fsSL \
+              -H "Authorization: Bearer ${RELEASE_LLM_API_KEY}" \
+              -H "Content-Type: application/json" \
+              "$CHAT_COMPLETIONS_URL" \
+              -d "$REQUEST_BODY" 2>/dev/null)"; then
+              CONTENT="$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")"
+              if [ -n "$CONTENT" ]; then
+                printf '%s\n' "$CONTENT" > "$RELEASE_NOTES_FILE"
+                LLM_SUCCESS="true"
+              fi
+            fi
+          fi
+
+          if [ "$LLM_SUCCESS" != "true" ]; then
+            cat > "$RELEASE_NOTES_FILE" <<EOF_FALLBACK
+# Release ${NEXT_VERSION}
+
+## Summary
+This release includes updates from the selected commit range for ${GITHUB_REPOSITORY}.
+
+## Highlights
+- Release type: ${RELEASE_TYPE}
+- Baseline mode: ${BASELINE_MODE}
+- Commit range: ${RANGE_SPEC}
+- Commit list truncated: ${TRUNCATED_NOTE}
+
+## Fixes
+- See included commits for detailed changes.
+
+## Breaking Changes
+None.
+
+## Compatibility
+- Minimum version: ${MINIMUM_VERSION}
+- Recommended version: ${RECOMMENDED_VERSION}
+
+## Maintenance Policy
+- Current maintained line: ${MAINTAINED_CURRENT_LINE}
+- Previous maintained line: ${MAINTAINED_PREVIOUS_LINE}
+- Deprecated lines: ${DEPRECATED_LINES}
+
+## Included Commits
+${COMMITS_MD}
+EOF_FALLBACK
+          fi
+
+          echo "llm_success=${LLM_SUCCESS}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.next_version }}
+          name: Release ${{ steps.meta.outputs.next_version }}
+          target_commitish: ${{ github.ref_name }}
+          body_path: ${{ env.RELEASE_NOTES_FILE }}
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "Draft release created: ${{ steps.meta.outputs.next_version }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Baseline mode: ${{ steps.meta.outputs.baseline_mode }}"
+          echo "LLM notes generated: ${{ steps.notes.outputs.llm_success }}"
+          echo "Commits included: ${{ steps.meta.outputs.selected_commits }}/${{ steps.meta.outputs.total_commits }}"
